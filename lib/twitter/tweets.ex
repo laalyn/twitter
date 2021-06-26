@@ -203,7 +203,7 @@ defmodule Twitter.Tweets do
         IO.ANSI.format([:red_background, IO.ANSI.format([:black, "[tweets] cycle failed, attempting to continue..."])])
         |> IO.puts
 
-        {timers, inserts, lookups}
+        {{{0, DateTime.utc_now}, {DateTime.utc_now}}, {[], [], [], {[], [], [], []}, []}, {%{}, %{}, %{}}}
       end
     end)
 
