@@ -14,6 +14,7 @@ defmodule Twitter.Tweets do
 
   alias IO.ANSI
 
+  @cycles_to_insert 1000
   @reset_stream_sec 60 * 60
   @max_usage_mb 1024 * 8
 
@@ -43,7 +44,7 @@ defmodule Twitter.Tweets do
 
   defp stream_tweets_imp!() do
     ExTwitter.stream_sample([receive_messages: true])
-    |> Enum.reduce({{{0, DateTime.utc_now}, {DateTime.utc_now}, {DateTime.utc_now}}, {[], [], {[], [], [], []}, []}, {%{}, %{}, %{}}}, fn (cur, {{{cnt, cpt} = cpt_timer, {last_reset} = reset_timer, {last_insert} = insert_timer} = timers, {tweets, tweet_deletes, {users_w_both, users_wo_followers, users_wo_following, users_wo_both} = users, places} = inserts, {user_id_lookup, place_id_lookup, tweet_id_lookup} = lookups}) ->
+    |> Enum.reduce({{{0, DateTime.utc_now}, {DateTime.utc_now}, {0}}, {[], [], {[], [], [], []}, []}, {%{}, %{}, %{}}}, fn (cur, {{{cnt, cpt} = cpt_timer, {last_reset} = reset_timer, {last_insert_cycles} = insert_timer} = timers, {tweets, tweet_deletes, {users_w_both, users_wo_followers, users_wo_following, users_wo_both} = users, places} = inserts, {user_id_lookup, place_id_lookup, tweet_id_lookup} = lookups}) ->
       try do
         cpt_diff = DateTime.utc_now
                    |> DateTime.diff(cpt, :second)
@@ -66,12 +67,8 @@ defmodule Twitter.Tweets do
           raise "reset stream"
         end
 
-        insert_diff = DateTime.utc_now
-                      |> DateTime.diff(last_insert, :second)
-                      |> abs
-
-        {{last_insert} = insert_timer, {tweets, tweet_deletes, {users_w_both, users_wo_followers, users_wo_following, users_wo_both} = users, places} = inserts, {user_id_lookup, place_id_lookup, tweet_id_lookup} = lookups} =
-          if insert_diff > 10 do
+        {{last_insert_cycles} = insert_timer, {tweets, tweet_deletes, {users_w_both, users_wo_followers, users_wo_following, users_wo_both} = users, places} = inserts, {user_id_lookup, place_id_lookup, tweet_id_lookup} = lookups} =
+          if last_insert_cycles > @cycles_to_insert do
             users_w_both = Enum.uniq_by(users_w_both, fn (cur) ->
               cur.twitter_id
             end)
@@ -117,52 +114,32 @@ defmodule Twitter.Tweets do
               ANSI.format([:blue_background, ANSI.format([:black, "[tweets] inserting #{length(users_w_both)} users w both followers and following"])])
               |> IO.puts
 
-              users_w_both
-              |> Enum.chunk_every(400)
-              |> Enum.each(fn (cur) ->
-                User
-                |> Repo.insert_all(cur, on_conflict: {:replace_all_except, [:num_followers, :num_following, :inserted_at]}, conflict_target: [:twitter_id])
-              end)
+              User
+              |> Repo.insert_all(users_w_both, on_conflict: {:replace_all_except, [:num_followers, :num_following, :inserted_at]}, conflict_target: [:twitter_id])
 
               ANSI.format([:blue_background, ANSI.format([:black, "[tweets] inserting #{length(users_wo_followers)} users w/o any followers"])])
               |> IO.puts
 
-              users_wo_followers
-              |> Enum.chunk_every(400)
-              |> Enum.each(fn (cur) ->
-                User
-                |> Repo.insert_all(cur, on_conflict: {:replace_all_except, [:num_followers, :inserted_at]}, conflict_target: [:twitter_id])
-              end)
+              User
+              |> Repo.insert_all(users_wo_followers, on_conflict: {:replace_all_except, [:num_followers, :inserted_at]}, conflict_target: [:twitter_id])
 
               ANSI.format([:blue_background, ANSI.format([:black, "[tweets] inserting #{length(users_wo_following)} users w/o any following"])])
               |> IO.puts
 
-              users_wo_following
-              |> Enum.chunk_every(400)
-              |> Enum.each(fn (cur) ->
-                User
-                |> Repo.insert_all(cur, on_conflict: {:replace_all_except, [:num_following, :inserted_at]}, conflict_target: [:twitter_id])
-              end)
+              User
+              |> Repo.insert_all(users_wo_following, on_conflict: {:replace_all_except, [:num_following, :inserted_at]}, conflict_target: [:twitter_id])
 
               ANSI.format([:blue_background, ANSI.format([:black, "[tweets] inserting #{length(users_wo_both)} users w/o either followers nor following"])])
               |> IO.puts
 
-              users_wo_both
-              |> Enum.chunk_every(400)
-              |> Enum.each(fn (cur) ->
-                User
-                |> Repo.insert_all(cur, on_conflict: {:replace_all_except, [:inserted_at]}, conflict_target: [:twitter_id])
-              end)
+              User
+              |> Repo.insert_all(users_wo_both, on_conflict: {:replace_all_except, [:inserted_at]}, conflict_target: [:twitter_id])
 
               ANSI.format([:yellow_background, ANSI.format([:black, "[tweets] inserting #{length(places)} places"])])
               |> IO.puts
 
-              places
-              |> Enum.chunk_every(400)
-              |> Enum.each(fn (cur) ->
-                Place
-                |> Repo.insert_all(cur, on_conflict: :replace_all, conflict_target: [:twitter_id_str])
-              end)
+              Place
+              |> Repo.insert_all(places, on_conflict: :replace_all, conflict_target: [:twitter_id_str])
 
               if max_tweet_depth >= 0 do
                 max_tweet_depth..0
@@ -170,12 +147,8 @@ defmodule Twitter.Tweets do
                   ANSI.format([:green_background, ANSI.format([:black, "[tweets] inserting #{length(tweets[cur])} tweets at depth #{cur}"])])
                   |> IO.puts
 
-                  tweets[cur]
-                  |> Enum.chunk_every(400)
-                  |> Enum.each(fn (cur) ->
-                    Tweet
-                    |> Repo.insert_all(cur, on_conflict: :replace_all, conflict_target: [:twitter_id])
-                  end)
+                  Tweet
+                  |> Repo.insert_all(tweets[cur], on_conflict: :replace_all, conflict_target: [:twitter_id])
                 end)
               else
                 ANSI.format([:green_background, ANSI.format([:black, "[tweets] inserting 0 tweets"])])
@@ -402,9 +375,9 @@ defmodule Twitter.Tweets do
               end
             end
 
-            {{DateTime.utc_now}, {[], [], {[], [], [], []}, []}, {%{}, %{}, %{}}}
+            {{0}, {[], [], {[], [], [], []}, []}, {%{}, %{}, %{}}}
           else
-            {insert_timer, inserts, lookups}
+            {{last_insert_cycles + 1}, inserts, lookups}
           end
 
         case cur do
@@ -451,7 +424,7 @@ defmodule Twitter.Tweets do
             ANSI.format([:red_background, ANSI.format([:black, "[tweets] cycle failed, attempting to continue..."])])
             |> IO.puts
 
-            {{cpt_timer, reset_timer, {DateTime.utc_now}}, {[], [], {[], [], [], []}, []}, {%{}, %{}, %{}}}
+            {{cpt_timer, reset_timer, {0}}, {[], [], {[], [], [], []}, []}, {%{}, %{}, %{}}}
         end
       end
     end)
