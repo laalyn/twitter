@@ -9,20 +9,37 @@ defmodule Twitter.Tweets do
   alias Twitter.Places.Place
   alias Twitter.Tweets.Tweet
   alias Twitter.TweetDeletes.TweetDelete
-  alias Twitter.Events.Event
 
   alias ExTwitter.Model
 
+  alias IO.ANSI
+
+  @max_usage_mb 14
+
   def stream_tweets!() do
+    try do
+      stream_tweets_imp!
+    rescue err ->
+      IO.inspect(__STACKTRACE__)
+      IO.inspect(err)
+
+      ANSI.format([:black_background, ANSI.format([:red, "[tweets] cycle broken, restarting..."])])
+      |> IO.puts
+
+      stream_tweets!
+    end
+  end
+
+  defp stream_tweets_imp!() do
     ExTwitter.stream_sample([receive_messages: true])
-    |> Enum.reduce({{{0, DateTime.utc_now}, {DateTime.utc_now}}, {[], [], [], {[], [], [], []}, []}, {%{}, %{}, %{}}}, fn (cur, {{{cnt, cpt} = cpt_timer, {last_insert} = insert_timer} = timers, {events, tweets, tweet_deletes, {users_w_both, users_wo_followers, users_wo_following, users_wo_both} = users, places} = inserts, {user_id_lookup, place_id_lookup, tweet_id_lookup} = lookups}) ->
+    |> Enum.reduce({{{0, DateTime.utc_now}, {DateTime.utc_now}}, {[], [], {[], [], [], []}, []}, {%{}, %{}, %{}}}, fn (cur, {{{cnt, cpt} = cpt_timer, {last_insert} = insert_timer} = timers, {tweets, tweet_deletes, {users_w_both, users_wo_followers, users_wo_following, users_wo_both} = users, places} = inserts, {user_id_lookup, place_id_lookup, tweet_id_lookup} = lookups}) ->
       try do
         cpt_diff = DateTime.utc_now
                    |> DateTime.diff(cpt, :second)
                    |> abs
 
         cpt_timer = if cpt_diff > 60 do
-          IO.ANSI.format([:black_background, IO.ANSI.format([:blue, "[tweets] #{cnt} cycles/min"])])
+          ANSI.format([:black_background, ANSI.format([:blue, "[tweets] #{cnt} cycles/min"])])
           |> IO.puts
 
           {0, DateTime.utc_now}
@@ -34,105 +51,321 @@ defmodule Twitter.Tweets do
                       |> DateTime.diff(last_insert, :second)
                       |> abs
 
-        {{last_insert} = insert_timer, {events, tweets, tweet_deletes, {users_w_both, users_wo_followers, users_wo_following, users_wo_both} = users, places} = inserts, {user_id_lookup, place_id_lookup, tweet_id_lookup} = lookups} =
+        {{last_insert} = insert_timer, {tweets, tweet_deletes, {users_w_both, users_wo_followers, users_wo_following, users_wo_both} = users, places} = inserts, {user_id_lookup, place_id_lookup, tweet_id_lookup} = lookups} =
           if insert_diff > 10 do
+            insert_timer = {DateTime.utc_now}
+
+            users_w_both = Enum.uniq_by(users_w_both, fn (cur) ->
+              cur.twitter_id
+            end)
+
+            users_wo_followers = Enum.uniq_by(users_wo_followers, fn (cur) ->
+              cur.twitter_id
+            end)
+
+            users_wo_following = Enum.uniq_by(users_wo_following, fn (cur) ->
+              cur.twitter_id
+            end)
+
+            users_wo_both = Enum.uniq_by(users_wo_both, fn (cur) ->
+              cur.twitter_id
+            end)
+
+            places = Enum.uniq_by(places, fn (cur) ->
+              cur.twitter_id_str
+            end)
+
+            tweets = Enum.uniq_by(tweets, fn ({depth, cur}) ->
+              cur.twitter_id
+            end)
+
+            {max_tweet_depth, tweets} = Enum.reduce(tweets, {0, %{}}, fn ({depth, cur}, {max_depth, acc}) ->
+              tweets = if acc[depth] === nil do
+                []
+              else
+                acc[depth]
+              end
+
+              acc = acc
+                    |> Map.put(depth, [cur | tweets])
+
+              {max(depth, max_depth), acc}
+            end)
+
+            tweet_deletes = Enum.uniq_by(tweet_deletes, fn (cur) ->
+              {cur.twitter_user_id, cur.twitter_tweet_id}
+            end)
+
             Repo.transaction(fn ->
-              IO.ANSI.format([:white_background, IO.ANSI.format([:black, "[tweets] inserting #{length(events)} events"])])
-              |> IO.puts
-
-              Event
-              |> Repo.insert_all(events)
-
-              users_w_both = Enum.uniq_by(users_w_both, fn (cur) ->
-                cur.twitter_id
-              end)
-
-              IO.ANSI.format([:blue_background, IO.ANSI.format([:black, "[tweets] inserting #{length(users_w_both)} users w both followers and following"])])
+              ANSI.format([:blue_background, ANSI.format([:black, "[tweets] inserting #{length(users_w_both)} users w both followers and following"])])
               |> IO.puts
 
               User
               |> Repo.insert_all(users_w_both, on_conflict: {:replace_all_except, [:num_followers, :num_following, :inserted_at]}, conflict_target: [:twitter_id])
 
-              users_wo_followers = Enum.uniq_by(users_wo_followers, fn (cur) ->
-                cur.twitter_id
-              end)
-
-              IO.ANSI.format([:blue_background, IO.ANSI.format([:black, "[tweets] inserting #{length(users_wo_followers)} users w/o any followers"])])
+              ANSI.format([:blue_background, ANSI.format([:black, "[tweets] inserting #{length(users_wo_followers)} users w/o any followers"])])
               |> IO.puts
 
               User
               |> Repo.insert_all(users_wo_followers, on_conflict: {:replace_all_except, [:num_followers, :inserted_at]}, conflict_target: [:twitter_id])
 
-              users_wo_following = Enum.uniq_by(users_wo_following, fn (cur) ->
-                cur.twitter_id
-              end)
-
-              IO.ANSI.format([:blue_background, IO.ANSI.format([:black, "[tweets] inserting #{length(users_wo_following)} users w/o any following"])])
+              ANSI.format([:blue_background, ANSI.format([:black, "[tweets] inserting #{length(users_wo_following)} users w/o any following"])])
               |> IO.puts
 
               User
               |> Repo.insert_all(users_wo_following, on_conflict: {:replace_all_except, [:num_following, :inserted_at]}, conflict_target: [:twitter_id])
 
-              users_wo_both = Enum.uniq_by(users_wo_both, fn (cur) ->
-                cur.twitter_id
-              end)
-
-              IO.ANSI.format([:blue_background, IO.ANSI.format([:black, "[tweets] inserting #{length(users_wo_both)} users w/o either followers nor following"])])
+              ANSI.format([:blue_background, ANSI.format([:black, "[tweets] inserting #{length(users_wo_both)} users w/o either followers nor following"])])
               |> IO.puts
 
               User
               |> Repo.insert_all(users_wo_both, on_conflict: {:replace_all_except, [:inserted_at]}, conflict_target: [:twitter_id])
 
-              places = Enum.uniq_by(places, fn (cur) ->
-                cur.twitter_id_str
-              end)
-
-              IO.ANSI.format([:yellow_background, IO.ANSI.format([:black, "[tweets] inserting #{length(places)} places"])])
+              ANSI.format([:yellow_background, ANSI.format([:black, "[tweets] inserting #{length(places)} places"])])
               |> IO.puts
 
               Place
               |> Repo.insert_all(places, on_conflict: :replace_all, conflict_target: [:twitter_id_str])
 
-              tweets = Enum.uniq_by(tweets, fn ({depth, cur}) ->
-                cur.twitter_id
-              end)
-
-              {max_depth, tweets} = Enum.reduce(tweets, {0, %{}}, fn ({depth, cur}, {max_depth, acc}) ->
-                tweets = if acc[depth] === nil do
-                  []
-                else
-                  acc[depth]
-                end
-
-                acc = acc
-                      |> Map.put(depth, [cur | tweets])
-
-                {max(depth, max_depth), acc}
-              end)
-
-              max_depth..0
+              max_tweet_depth..0
               |> Enum.each(fn (cur) ->
-                IO.ANSI.format([:green_background, IO.ANSI.format([:black, "[tweets] inserting #{length(tweets[cur])} tweets at depth #{cur}"])])
+                ANSI.format([:green_background, ANSI.format([:black, "[tweets] inserting #{length(tweets[cur])} tweets at depth #{cur}"])])
                 |> IO.puts
 
                 Tweet
                 |> Repo.insert_all(tweets[cur], on_conflict: :replace_all, conflict_target: [:twitter_id])
               end)
 
-              tweet_deletes = Enum.uniq_by(tweet_deletes, fn (cur) ->
-                {cur.twitter_user_id, cur.twitter_tweet_id}
-              end)
-
-              IO.ANSI.format([:black_background, IO.ANSI.format([:green, "[tweets] inserting #{length(tweet_deletes)} tweet deletes"])])
+              # ignored for now to save space
+              ANSI.format([:black_background, ANSI.format([:green, "[tweets] ignoring #{length(tweet_deletes)} tweet deletes"])])
               |> IO.puts
 
-              TweetDelete
-              |> Repo.insert_all(tweet_deletes, on_conflict: :replace_all, conflict_target: [:twitter_user_id, :twitter_tweet_id])
+              # TweetDelete
+              # |> Repo.insert_all(tweet_deletes, on_conflict: :replace_all, conflict_target: [:twitter_user_id, :twitter_tweet_id])
 
               {:ok}
             end, timeout: :infinity)
 
-            {{DateTime.utc_now}, {[], [], [], {[], [], [], []}, []}, {%{}, %{}, %{}}}
+            %Postgrex.Result {
+              rows: [[usage]]
+            } = Repo.query!("select pg_database_size('#{System.get_env("DB_NAME")}')")
+
+            initial_usage_mb = div(usage, 1_048_576)
+
+            ANSI.format([:white_background, ANSI.format([:black, "[tweets] db at #{initial_usage_mb} mb"])])
+            |> IO.puts
+
+            # TODO 8 gigs
+            if initial_usage_mb > @max_usage_mb do
+              num_users = from u in User,
+                            select: count(u)
+              num_tweets = from t in Tweet,
+                             select: count(t)
+
+              [num_users_b4] = num_users
+                               |> Repo.all()
+              [num_tweets_b4] = num_tweets
+                                |> Repo.all()
+
+              ANSI.format([:white_background, ANSI.format([:black, "[tweets] cleaning db... (layer 1)"])])
+              |> IO.puts
+
+              Repo.transaction(fn ->
+                # TODO repeatable read
+
+                good = from t in Tweet,
+                         join: u in User, on: t.user_id == u.id,
+                         where: not ((is_nil(t.coordinates) and is_nil(t.place_id)) and (is_nil(u.description) or is_nil(u.location))),
+                         select: u.id
+                # dbg = good
+                #       |> Repo.all()
+                # IO.puts("#{length(dbg)} good tweets")
+                # dbg = dbg
+                #       |> Enum.uniq
+                # IO.puts("#{length(dbg)} good users")
+
+                bad = from t in Tweet,
+                        join: u in User, on: t.user_id == u.id,
+                        where: (is_nil(t.coordinates) and is_nil(t.place_id)) and (is_nil(u.description) or is_nil(u.location)),
+                        select: u.id
+                # dbg = bad
+                #       |> Repo.all()
+                # IO.puts("#{length(dbg)} bad tweets")
+                # dbg = dbg
+                #       |> Enum.uniq
+                # IO.puts("#{length(dbg)} bad users")
+
+                rm_users = from u in User,
+                             where: u.id in subquery(except(bad, ^good))
+                {cnt, nil} = rm_users
+                             |> Repo.delete_all()
+
+                ANSI.format([:black_background, ANSI.format([:blue, "[tweets] deleted #{cnt} users and their tweets"])])
+                |> IO.puts
+
+                rm_tweets = from t in Tweet,
+                              join: u in User, on: t.user_id == u.id,
+                              where: (is_nil(t.coordinates) and is_nil(t.place_id)) and (is_nil(u.description) or is_nil(u.location))
+                              # no location info on the tweet and not enough identifying information from the user
+                {cnt, nil} = rm_tweets
+                             |> Repo.delete_all()
+
+                ANSI.format([:black_background, ANSI.format([:green, "[tweets] deleted #{cnt} additional tweets"])])
+                |> IO.puts
+
+                [num_users_af] = num_users
+                                 |> Repo.all()
+                [num_tweets_af] = num_tweets
+                                  |> Repo.all()
+
+                ANSI.format([:white_background, ANSI.format([:black, "[tweets] reduced users by #{Float.round(((num_users_b4 - num_users_af) / num_users_b4) * 100, 2)}%"])])
+                |> IO.puts
+
+                ANSI.format([:white_background, ANSI.format([:black, "[tweets] reduced tweets by #{Float.round(((num_tweets_b4 - num_tweets_af) / num_tweets_b4) * 100, 2)}%"])])
+                |> IO.puts
+
+                {:ok}
+              end)
+
+              Repo.query!("vacuum full")
+
+              %Postgrex.Result {
+                rows: [[usage]]
+              } = Repo.query!("select pg_database_size('#{System.get_env("DB_NAME")}')")
+
+              usage_mb = div(usage, 1_048_576)
+
+              ANSI.format([:white_background, ANSI.format([:black, "[tweets] db now at #{usage_mb} mb (from #{initial_usage_mb} mb)"])])
+              |> IO.puts
+
+              if usage_mb > @max_usage_mb do
+                ANSI.format([:white_background, ANSI.format([:black, "[tweets] cleaning db... (layer 2)"])])
+                |> IO.puts
+
+                Repo.transaction(fn ->
+                  good = from t in Tweet,
+                           join: u in User, on: t.user_id == u.id,
+                           where: not (is_nil(t.coordinates) and is_nil(t.place_id)),
+                           select: u.id
+
+                  bad = from t in Tweet,
+                          join: u in User, on: t.user_id == u.id,
+                          where: is_nil(t.coordinates) and is_nil(t.place_id),
+                          select: u.id
+
+                  rm_users = from u in User,
+                               where: u.id in subquery(except(bad, ^good))
+                  {cnt, nil} = rm_users
+                               |> Repo.delete_all()
+
+                  ANSI.format([:black_background, ANSI.format([:blue, "[tweets] deleted #{cnt} users and their tweets"])])
+                  |> IO.puts
+
+                  rm_tweets = from t in Tweet,
+                                join: u in User, on: t.user_id == u.id,
+                                where: is_nil(t.coordinates) and is_nil(t.place_id)
+                  {cnt, nil} = rm_tweets
+                               |> Repo.delete_all()
+
+                  ANSI.format([:black_background, ANSI.format([:green, "[tweets] deleted #{cnt} additional tweets"])])
+                  |> IO.puts
+
+                  [num_users_af] = num_users
+                                   |> Repo.all()
+                  [num_tweets_af] = num_tweets
+                                    |> Repo.all()
+
+                  ANSI.format([:white_background, ANSI.format([:black, "[tweets] reduced users by #{Float.round(((num_users_b4 - num_users_af) / num_users_b4) * 100, 2)}%"])])
+                  |> IO.puts
+
+                  ANSI.format([:white_background, ANSI.format([:black, "[tweets] reduced tweets by #{Float.round(((num_tweets_b4 - num_tweets_af) / num_tweets_b4) * 100, 2)}%"])])
+                  |> IO.puts
+
+                  {:ok}
+                end)
+
+                Repo.query!("vacuum full")
+
+                %Postgrex.Result {
+                  rows: [[usage]]
+                } = Repo.query!("select pg_database_size('#{System.get_env("DB_NAME")}')")
+
+                usage_mb = div(usage, 1_048_576)
+
+                ANSI.format([:white_background, ANSI.format([:black, "[tweets] db now at #{usage_mb} mb (from #{initial_usage_mb} mb)"])])
+                |> IO.puts
+
+                if usage_mb > @max_usage_mb do
+                  ANSI.format([:white_background, ANSI.format([:black, "[tweets] cleaning db... (layer 3)"])])
+                  |> IO.puts
+
+                  Repo.transaction(fn ->
+                    good = from t in Tweet,
+                             join: u in User, on: t.user_id == u.id,
+                             where: not is_nil(t.coordinates),
+                             select: u.id
+
+                    bad = from t in Tweet,
+                            join: u in User, on: t.user_id == u.id,
+                            where: is_nil(t.coordinates),
+                            select: u.id
+
+                    rm_users = from u in User,
+                                 where: u.id in subquery(except(bad, ^good))
+                    {cnt, nil} = rm_users
+                                 |> Repo.delete_all()
+
+                    ANSI.format([:black_background, ANSI.format([:blue, "[tweets] deleted #{cnt} users and their tweets"])])
+                    |> IO.puts
+
+                    rm_tweets = from t in Tweet,
+                                  join: u in User, on: t.user_id == u.id,
+                                  where: is_nil(t.coordinates)
+                    {cnt, nil} = rm_tweets
+                                 |> Repo.delete_all()
+
+                    ANSI.format([:black_background, ANSI.format([:green, "[tweets] deleted #{cnt} additional tweets"])])
+                    |> IO.puts
+
+                    [num_users_af] = num_users
+                                     |> Repo.all()
+                    [num_tweets_af] = num_tweets
+                                      |> Repo.all()
+
+                    ANSI.format([:white_background, ANSI.format([:black, "[tweets] reduced users by #{Float.round(((num_users_b4 - num_users_af) / num_users_b4) * 100, 2)}%"])])
+                    |> IO.puts
+
+                    ANSI.format([:white_background, ANSI.format([:black, "[tweets] reduced tweets by #{Float.round(((num_tweets_b4 - num_tweets_af) / num_tweets_b4) * 100, 2)}%"])])
+                    |> IO.puts
+
+                    {:ok}
+                  end)
+
+                  Repo.query!("vacuum full")
+
+                  %Postgrex.Result {
+                    rows: [[usage]]
+                  } = Repo.query!("select pg_database_size('#{System.get_env("DB_NAME")}')")
+
+                  usage_mb = div(usage, 1_048_576)
+
+                  ANSI.format([:white_background, ANSI.format([:black, "[tweets] db now at #{usage_mb} mb (from #{initial_usage_mb} mb)"])])
+                  |> IO.puts
+
+                  if usage_mb > @max_usage_mb do
+                    ANSI.format([:black_background, ANSI.format([:white, "[tweets] db is full"])])
+                    |> IO.puts
+
+                    path = System.find_executable("pkill")
+                    System.cmd(path, ["beam.smp"])
+
+                    raise "db is full"
+                  end
+                end
+              end
+            end
+
+            {insert_timer, {[], [], {[], [], [], []}, []}, {%{}, %{}, %{}}}
           else
             {insert_timer, inserts, lookups}
           end
@@ -143,54 +376,26 @@ defmodule Twitter.Tweets do
 
             {{cpt_timer, insert_timer}, inserts, lookups}
           %Model.DeletedTweet{} ->
-            event = cur
-                    |> Map.from_struct()
-
-            event = %{
-              id: UUID.generate(),
-              val: event,
-              inserted_at: DateTime.utc_now,
-            }
-
-            events = [event | events]
-
             tweet_delete = cur.status
 
             tweet_delete = %{
               id: UUID.generate(),
               twitter_user_id: tweet_delete.user_id,
               twitter_tweet_id: tweet_delete.id,
-              event_id: event.id,
               inserted_at: DateTime.utc_now
             }
 
             tweet_deletes = [tweet_delete | tweet_deletes]
 
-            {{cpt_timer, insert_timer}, {events, tweets, tweet_deletes, users, places}, lookups}
+            {{cpt_timer, insert_timer}, {tweets, tweet_deletes, users, places}, lookups}
           %Model.Limit{} ->
-            IO.ANSI.format([:black_background, IO.ANSI.format([:yellow, "[tweets] got limit on #{cur.track}"])])
+            ANSI.format([:black_background, ANSI.format([:yellow, "[tweets] got limit on #{cur.track}"])])
             |> IO.puts
-
-            event = cur
-                    |> Map.from_struct()
-
-            %Event {
-              val: event
-            }
-            |> Repo.insert!
 
             {{cpt_timer, insert_timer}, inserts, lookups}
           %Model.StallWarning{} ->
-            IO.ANSI.format([:black_background, IO.ANSI.format([:yellow, "[tweets] got stall warning #{cur.code}, #{cur.message} (#{cur.percent_full})"])])
+            ANSI.format([:black_background, ANSI.format([:yellow, "[tweets] got stall warning #{cur.code}, #{cur.message} (#{cur.percent_full})"])])
             |> IO.puts
-
-            event = cur
-                    |> Map.from_struct()
-
-            %Event {
-              val: event
-            }
-            |> Repo.insert!
 
             {{cpt_timer, insert_timer}, inserts, lookups}
           _ ->
@@ -200,30 +405,17 @@ defmodule Twitter.Tweets do
         IO.inspect(__STACKTRACE__)
         IO.inspect(err)
 
-        IO.ANSI.format([:red_background, IO.ANSI.format([:black, "[tweets] cycle failed, attempting to continue..."])])
+        ANSI.format([:red_background, ANSI.format([:black, "[tweets] cycle failed, attempting to continue..."])])
         |> IO.puts
 
-        {{{0, DateTime.utc_now}, {DateTime.utc_now}}, {[], [], [], {[], [], [], []}, []}, {%{}, %{}, %{}}}
+        {{{0, DateTime.utc_now}, {DateTime.utc_now}}, {[], [], {[], [], [], []}, []}, {%{}, %{}, %{}}}
       end
     end)
 
-    IO.ANSI.format([:black_background, IO.ANSI.format([:red, "[tweets] stream stopped"])])
-    |> IO.puts
-
-    :ok
+    raise "stream stopped"
   end
 
-  defp add_tweet!(cur, {{events, tweets, tweet_deletes, {users_w_both, users_wo_followers, users_wo_following, users_wo_both} = users, places} = inserts, {user_id_lookup, place_id_lookup, tweet_id_lookup} = lookups}, depth) do
-    event = cur.raw_data
-
-    event = %{
-      id: UUID.generate(),
-      val: event,
-      inserted_at: DateTime.utc_now,
-    }
-
-    events = [event | events]
-
+  defp add_tweet!(cur, {{tweets, tweet_deletes, {users_w_both, users_wo_followers, users_wo_following, users_wo_both} = users, places} = inserts, {user_id_lookup, place_id_lookup, tweet_id_lookup} = lookups}, depth) do
     user = cur.user
 
     user_created_at = user.created_at
@@ -309,9 +501,9 @@ defmodule Twitter.Tweets do
 
     tweet = cur
 
-    {inserts, lookups} = {{events, tweets, tweet_deletes, users, places}, {user_id_lookup, place_id_lookup, tweet_id_lookup}}
+    {inserts, lookups} = {{tweets, tweet_deletes, users, places}, {user_id_lookup, place_id_lookup, tweet_id_lookup}}
 
-    {is_retweet, {retweeted_tweet_id, {{events, tweets, tweet_deletes, users, places} = inserts, {user_id_lookup, place_id_lookup, tweet_id_lookup} = lookups}}} =
+    {is_retweet, {retweeted_tweet_id, {{tweets, tweet_deletes, users, places} = inserts, {user_id_lookup, place_id_lookup, tweet_id_lookup} = lookups}}} =
       if tweet.raw_data[:retweeted_status] !== nil do
         result = tweet.raw_data.retweeted_status
                  |> Map.put(:raw_data, tweet.raw_data.retweeted_status)
@@ -322,9 +514,9 @@ defmodule Twitter.Tweets do
         {false, {nil, {inserts, lookups}}}
       end
 
-    {inserts, lookups} = {{events, tweets, tweet_deletes, users, places}, {user_id_lookup, place_id_lookup, tweet_id_lookup}}
+    {inserts, lookups} = {{tweets, tweet_deletes, users, places}, {user_id_lookup, place_id_lookup, tweet_id_lookup}}
 
-    {quoted_tweet_id, {{events, tweets, tweet_deletes, users, places} = inserts, {user_id_lookup, place_id_lookup, tweet_id_lookup} = lookups}} =
+    {quoted_tweet_id, {{tweets, tweet_deletes, users, places} = inserts, {user_id_lookup, place_id_lookup, tweet_id_lookup} = lookups}} =
       if tweet.raw_data[:quoted_status] !== nil do
         tweet.raw_data.quoted_status
         |> Map.put(:raw_data, tweet.raw_data.quoted_status)
@@ -376,13 +568,12 @@ defmodule Twitter.Tweets do
       quoted_tweet_id: quoted_tweet_id,
       place_id: (if place !== nil, do: hd(places).id, else: nil),
       user_id: user.id,
-      event_id: event.id,
       inserted_at: DateTime.utc_now
     }}
 
     tweets = [tweet | tweets]
 
-    {inner.id, {{events, tweets, tweet_deletes, users, places}, {user_id_lookup, place_id_lookup, tweet_id_lookup}}}
+    {inner.id, {{tweets, tweet_deletes, users, places}, {user_id_lookup, place_id_lookup, tweet_id_lookup}}}
   end
 
   defp map_cast!(%{__struct__: _} = struct) do

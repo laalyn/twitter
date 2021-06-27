@@ -3,7 +3,6 @@ defmodule Twitter.Tweets.Tweet do
 
   alias Geo.PostGIS.Geometry
 
-  alias Twitter.Events.Event
   alias Twitter.Users.User
   alias Twitter.Places.Place
   alias Twitter.Tweets.Tweet
@@ -38,7 +37,6 @@ defmodule Twitter.Tweets.Tweet do
     belongs_to :quoted_tweet, Tweet
     belongs_to :place, Place
     belongs_to :user, User
-    belongs_to :event, Event
 
     timestamps()
   end
