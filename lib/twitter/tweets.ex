@@ -14,6 +14,7 @@ defmodule Twitter.Tweets do
 
   alias IO.ANSI
 
+  @reset_stream_sec 60 * 60
   @max_usage_mb 1024 * 8
 
   def stream_tweets!() do
@@ -61,7 +62,7 @@ defmodule Twitter.Tweets do
                      |> DateTime.diff(last_reset, :second)
                      |> abs
 
-        if reset_diff > 60 do
+        if reset_diff > @reset_stream_sec do
           raise "reset stream"
         end
 
