@@ -14,7 +14,7 @@ defmodule Twitter.Tweets do
 
   alias IO.ANSI
 
-  @max_usage_mb 14
+  @max_usage_mb 1024 * 8
 
   def stream_tweets!() do
     try do
