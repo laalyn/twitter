@@ -15,8 +15,9 @@ defmodule Twitter.Tweets do
   alias IO.ANSI
 
   @cycles_to_insert 1000
-  @reset_stream_sec 60 * 60
-  @max_usage_mb 1024 * 8
+  # @reset_stream_sec 60
+  @max_usage_mb 1024 * 16
+  @cycle_acc 60 * 10
 
   def stream_tweets!() do
     try do
@@ -50,22 +51,26 @@ defmodule Twitter.Tweets do
                    |> DateTime.diff(cpt, :second)
                    |> abs
 
-        cpt_timer = if cpt_diff > 60 do
-          ANSI.format([:black_background, ANSI.format([:blue, "[tweets] #{cnt} cycles/min"])])
+        if cnt == -1 && cpt_diff <= 10 do
+          raise "seeking"
+        end
+
+        cpt_timer = if cpt_diff > @cycle_acc do
+          ANSI.format([:black_background, ANSI.format([:blue, "[tweets] #{cnt} cycles per #{@cycle_acc} sec"])])
           |> IO.puts
 
-          {0, DateTime.utc_now}
+          {-1, DateTime.utc_now}
         else
           {cnt + 1, cpt}
         end
 
-        reset_diff = DateTime.utc_now
-                     |> DateTime.diff(last_reset, :second)
-                     |> abs
+        # reset_diff = DateTime.utc_now
+        #              |> DateTime.diff(last_reset, :second)
+        #              |> abs
 
-        if reset_diff > @reset_stream_sec do
-          raise "reset stream"
-        end
+        # if reset_diff > @reset_stream_sec do
+        #   raise "reset stream"
+        # end
 
         {{last_insert_cycles} = insert_timer, {tweets, tweet_deletes, {users_w_both, users_wo_followers, users_wo_following, users_wo_both} = users, places} = inserts, {user_id_lookup, place_id_lookup, tweet_id_lookup} = lookups} =
           if last_insert_cycles > @cycles_to_insert do
@@ -420,6 +425,11 @@ defmodule Twitter.Tweets do
             raise err
           %RuntimeError{message: "reset stream"} ->
             raise err
+          %RuntimeError{message: "seeking"} ->
+            ANSI.format([:black_background, ANSI.format([:green, "[tweets] seeking..."])])
+            |> IO.puts
+
+            {{cpt_timer, reset_timer, {0}}, {[], [], {[], [], [], []}, []}, {%{}, %{}, %{}}}
           _ ->
             ANSI.format([:red_background, ANSI.format([:black, "[tweets] cycle failed, attempting to continue..."])])
             |> IO.puts
