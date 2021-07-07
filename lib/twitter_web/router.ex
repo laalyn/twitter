@@ -9,6 +9,8 @@ defmodule TwitterWeb.Router do
     pipe_through :api
 
     post "/tweets-stream", TweetController, :stream
+
+    get "/query/countries", QueryController, :countries
   end
 
   # Enables LiveDashboard only for development
