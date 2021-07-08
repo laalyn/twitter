@@ -39,5 +39,7 @@ defmodule Twitter.Tweets.Tweet do
     belongs_to :user, User
 
     timestamps()
+
+    field :translated, :string
   end
 end

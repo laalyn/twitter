@@ -16,8 +16,8 @@ defmodule Twitter.Tweets do
 
   @cycles_to_insert 1000
   # @reset_stream_sec 60
-  @max_usage_mb 1024 * 16
-  @cycle_acc 60 * 10
+  @max_usage_mb 1024 * 256
+  @cycle_acc 60 * 60
 
   def stream_tweets!() do
     try do
